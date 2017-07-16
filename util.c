@@ -2241,7 +2241,7 @@ void *tq_pop(struct thread_q *tq, const struct timespec *abstime)
 	struct tq_ent *ent;
 	void *rval = NULL;
 	int rc;
-
+	
 	pthread_mutex_lock(&tq->mutex);
 
 	if (!list_empty(&tq->q))
@@ -2338,4 +2338,3 @@ void print_hash_tests(void)
 
 	free(scratchbuf);
 }
-

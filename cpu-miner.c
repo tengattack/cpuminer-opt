@@ -38,7 +38,7 @@
 #include <curl/curl.h>
 #include <jansson.h>
 #include <openssl/sha.h>
-
+#include <mpi.h>
 
 #ifdef _MSC_VER
 #include <windows.h>
@@ -87,6 +87,7 @@ bool have_gbt = true;
 bool allow_getwork = true;
 bool want_stratum = true;
 bool have_stratum = false;
+int mpi_rank = -1;
 bool allow_mininginfo = true;
 bool use_syslog = false;
 bool use_colors = true;
@@ -274,6 +275,67 @@ void work_copy(struct work *dest, const struct work *src)
 		dest->xnonce2 = (uchar*) malloc(src->xnonce2_len);
 		memcpy(dest->xnonce2, src->xnonce2, src->xnonce2_len);
 	}
+}
+
+void work_data_copy(struct work_data *dest, const struct work *src)
+{
+  memcpy(dest->data, src->data, 48 * sizeof(uint32_t));
+  memcpy(dest->target, src->target, 8 * sizeof(uint32_t));
+
+  dest->targetdiff = src->targetdiff;
+  dest->shareratio = src->shareratio;
+  dest->sharediff = src->sharediff;
+
+  dest->height = src->height;
+  if (src->txs)
+    strcpy(dest->txs, src->txs);
+  else
+    dest->txs[0] = 0;
+  if (src->workid)
+    strcpy(dest->workid, src->workid);
+  else
+    dest->workid[0] = 0;
+  if (src->job_id)
+    strcpy(dest->job_id, src->job_id);
+  else
+    dest->job_id[0] = 0;
+    
+  dest->xnonce2_len = src->xnonce2_len;
+  if (src->xnonce2) {
+    memcpy(dest->xnonce2, src->xnonce2, src->xnonce2_len);
+  }
+}
+
+void work_copy_data(struct work *dest, const struct work_data *src)
+{
+  memcpy(dest->data, src->data, 48 * sizeof(uint32_t));
+  memcpy(dest->target, src->target, 8 * sizeof(uint32_t));
+
+  dest->targetdiff = src->targetdiff;
+  dest->shareratio = src->shareratio;
+  dest->sharediff = src->sharediff;
+
+  dest->height = src->height;
+  if (src->txs[0] != 0)
+    dest->txs = strdup(src->txs);
+  else
+    dest->txs = NULL;
+  if (src->workid[0] != 0)
+    dest->workid = strdup(src->workid);
+  else
+    dest->workid = NULL;
+  if (src->job_id[0] != 0)
+    dest->job_id = strdup(src->job_id);
+  else
+    dest->job_id = NULL;
+    
+  dest->xnonce2_len = src->xnonce2_len;
+  if (src->xnonce2[0] != 0) {
+		dest->xnonce2 = (uchar*) malloc(src->xnonce2_len);
+    memcpy(dest->xnonce2, src->xnonce2, src->xnonce2_len);
+  } else {
+    dest->xnonce2 = NULL;
+  }
 }
 
 bool jr2_work_decode( const json_t *val, struct work *work )
@@ -958,6 +1020,27 @@ static bool submit_upstream_work( CURL *curl, struct work *work )
    }
    if ( have_stratum )
    {
+       if ( mpi_rank > 0 ) {
+         int ret;
+         struct work_data *wd = NULL;
+         wd = (struct work_data *)calloc(1, sizeof(*wd));
+         work_data_copy(wd, work);
+         if (!opt_quiet)
+     			 applog(LOG_DEBUG, "MPI %d stratum submit work height: %d, job_id: %s, workid: %s, txs: %s, xnonce2: %s",
+              mpi_rank, work->height,
+              work->job_id ? work->job_id : "NULL",
+              work->workid ? work->workid : "NULL",
+              work->txs ? work->txs : "NULL",
+              work->xnonce2 ? work->xnonce2 : "NULL");
+         ret = MPI_Send(wd, sizeof(struct work_data), MPI_BYTE, 0, 0, MPI_COMM_WORLD);
+         free(wd);
+         if (ret != MPI_SUCCESS)
+         {
+           applog(LOG_ERR, "submit_upstream_work MPI_Send failed");
+           return false;
+         }
+         return true;
+       }
        algo_gate.build_stratum_request( req, work, &stratum );
        if ( unlikely( !stratum_send_line( &stratum, req ) ) )
        {
@@ -1042,6 +1125,9 @@ static const char *gbt_lp_req =
 	"{\"method\": \"getblocktemplate\", \"params\": [{\"capabilities\": "
 	GBT_CAPABILITIES ", \"longpollid\": \"%s\"}], \"id\":0}\r\n";
 
+#define RBUFSIZE 2048
+#define RECVSIZE (RBUFSIZE - 4)
+
 static bool get_upstream_work(CURL *curl, struct work *work)
 {
 	json_t *val;
@@ -1052,7 +1138,15 @@ static bool get_upstream_work(CURL *curl, struct work *work)
 start:
 	gettimeofday(&tv_start, NULL);
 
-	if (jsonrpc_2)
+  if (mpi_rank > 0) {
+    char buf[RBUFSIZE];
+    json_error_t err;
+    printf("mpi_worker get_upstream_work\n");
+    MPI_Bcast(&buf, RECVSIZE, MPI_CHAR, mpi_rank, MPI_COMM_WORLD);
+    printf("mpi bcast recv: %s\n", buf);
+    val = JSON_LOADS(buf, &err);
+  }
+	else if (jsonrpc_2)
         {
 		char s[128];
 		snprintf(s, 128, "{\"method\": \"getjob\", \"params\": {\"id\": \"%s\"}, \"id\":1}\r\n", rpc2_id);
@@ -1065,6 +1159,17 @@ start:
 		                    &err, have_gbt ? JSON_RPC_QUIET_404 : 0);
 	}
 	gettimeofday(&tv_end, NULL);
+  
+  if (val && mpi_rank == 0) {
+    char *s = NULL;
+    char buf[RBUFSIZE];
+    printf("mpi_master bcast upstream_work\n");
+    s = json_dumps(val, 0);
+    strcpy(buf, s);
+    free(s);
+    printf("mpi bcast send: %s\n", buf);
+    MPI_Bcast(&buf, RECVSIZE, MPI_CHAR, mpi_rank, MPI_COMM_WORLD);
+  }
 
 	if (have_stratum)
         {
@@ -1254,6 +1359,9 @@ static void *workio_thread(void *userdata)
 	struct thr_info *mythr = (struct thr_info *) userdata;
 	CURL *curl;
 	bool ok = true;
+  int ret;
+  struct work_data wd;
+  MPI_Request request;
 
 	curl = curl_easy_init();
 	if (unlikely(!curl))
@@ -1261,14 +1369,59 @@ static void *workio_thread(void *userdata)
 		applog(LOG_ERR, "CURL initialization failed");
 		return NULL;
 	}
-	if(jsonrpc_2 && !have_stratum)
+	if(jsonrpc_2 && !have_stratum && mpi_rank <= 0)
 		ok = rpc2_workio_login(curl);
+    if (mythr->mpi_rank == 0) {
+      memset(&wd, 0, sizeof(struct work_data));
+      MPI_Irecv(&wd, sizeof(struct work_data), MPI_BYTE, MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &request);
+    }
 	while (ok)
         {
 		struct workio_cmd *wc;
 
 		/* wait for workio_cmd sent to us, on our queue */
-		wc = (struct workio_cmd *) tq_pop(mythr->q, NULL);
+    if (mythr->mpi_rank == 0) {
+      MPI_Status status;
+      struct timeval now;
+      struct timespec t;
+      int flag = 0;
+      
+      while (flag == 0) {
+        MPI_Test(&request, &flag, &status);
+        if (flag) {
+          wc = (struct workio_cmd *)calloc(1, sizeof(*wc));
+          wc->cmd = WC_SUBMIT_WORK;
+          wc->thr = NULL;
+          wc->u.work = (struct work *)calloc(1, sizeof(*wc->u.work));
+          work_copy_data(wc->u.work, &wd);
+          
+          if (!opt_quiet)
+            applog(LOG_DEBUG, "MPI root received work height: %d, job_id: %s, workid: %s, txs: %s, xnonce2: %s",
+              wc->u.work->height,
+              wc->u.work->job_id ? wc->u.work->job_id : "NULL",
+              wc->u.work->workid ? wc->u.work->workid : "NULL",
+              wc->u.work->txs ? wc->u.work->txs : "NULL",
+              wc->u.work->xnonce2 ? wc->u.work->xnonce2 : "NULL");
+
+          memset(&wd, 0, sizeof(struct work_data));
+          MPI_Irecv(&wd, sizeof(struct work_data), MPI_BYTE, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &request);
+          break;
+        }
+        
+        gettimeofday(&now, NULL);
+        t.tv_sec = now.tv_sec + 1;
+        t.tv_nsec = now.tv_usec * 1000;
+        wc = (struct workio_cmd *) tq_pop(mythr->q, &t);
+        if (wc) {
+          break;
+        }
+        /*if (list_empty(&mythr->q->q)) {
+          
+        }*/
+      }
+    } else {
+  		wc = (struct workio_cmd *) tq_pop(mythr->q, NULL);
+    }
 		if (!wc)
                 {
 			ok = false;
@@ -1554,6 +1707,8 @@ static void *miner_thread( void *userdata )
 {
    struct   thr_info *mythr = (struct thr_info *) userdata;
    int      thr_id = mythr->id;
+   int      mpi_rank = mythr->mpi_rank;
+   int      mpi_size = mythr->mpi_size;
    struct   work work;
    uint32_t max_nonce;
 
@@ -1777,7 +1932,8 @@ static void *miner_thread( void *userdata )
              else // no fractions of a hash
                 sprintf( hc, "%.0f", hashcount );
              sprintf( hr, "%.2f", hashrate );
-             applog( LOG_INFO, "CPU #%d: %s %sH, %s %sH/s",
+             applog( LOG_INFO, "MPI %d/%d, CPU #%d: %s %sH, %s %sH/s",
+                               mpi_rank, mpi_size, 
                                thr_id, hc, hc_units, hr, hr_units );
           }
        }
@@ -2122,21 +2278,57 @@ void std_stratum_gen_work( struct stratum_ctx *sctx, struct work *g_work )
 
 void jr2_stratum_gen_work( struct stratum_ctx *sctx, struct work *g_work )
 {
+   struct work_data *wd = NULL;
+   if (mpi_rank >= 0) {
+     wd = (struct work_data *)malloc(sizeof(struct work_data));
+     memset(wd, 0, sizeof(struct work_data));
+   }
    pthread_mutex_lock( &sctx->work_lock );
+   if (mpi_rank == 0)
+   {
+      work_data_copy(wd, &sctx->work);
+      if (!opt_quiet)
+    		applog(LOG_DEBUG, "MPI root stratum send work height: %d, job_id: %s, workid: %s, txs: %s, xnonce2: %s",
+          sctx->work.height,
+          sctx->work.job_id ? sctx->work.job_id : "NULL",
+          sctx->work.workid ? sctx->work.workid : "NULL",
+          sctx->work.txs ? sctx->work.txs : "NULL",
+          sctx->work.xnonce2 ? sctx->work.xnonce2 : "NULL");
+      MPI_Bcast(wd, sizeof(struct work_data), MPI_BYTE, 0, MPI_COMM_WORLD);
+      MPI_Barrier(MPI_COMM_WORLD);
+   } else if (mpi_rank > 0) {
+      MPI_Bcast(wd, sizeof(struct work_data), MPI_BYTE, 0, MPI_COMM_WORLD);
+      MPI_Barrier(MPI_COMM_WORLD);
+      work_copy_data(&sctx->work, wd);
+      if (!opt_quiet)
+  			applog(LOG_DEBUG, "MPI %d stratum received work height: %d, job_id: %s, workid: %s, txs: %s, xnonce2: %s",
+          mpi_rank, sctx->work.height,
+          sctx->work.job_id ? sctx->work.job_id : "NULL",
+          sctx->work.workid ? sctx->work.workid : "NULL",
+          sctx->work.txs ? sctx->work.txs : "NULL",
+          sctx->work.xnonce2 ? sctx->work.xnonce2 : "NULL");
+   }
    work_free( g_work );
    work_copy( g_work, &sctx->work );
    pthread_mutex_unlock( &sctx->work_lock );
+   if (mpi_rank >= 0) {
+      free(wd);
+   }
 }
 
 static void *stratum_thread(void *userdata )
 {
     struct thr_info *mythr = (struct thr_info *) userdata;
     char *s;
+    struct work_data *wd = NULL;
 
     stratum.url = (char*) tq_pop(mythr->q, NULL);
     if (!stratum.url)
 	goto out;
-    applog(LOG_INFO, "Starting Stratum on %s", stratum.url);
+    if (mpi_rank <= 0)
+    {
+      applog(LOG_INFO, "Starting Stratum on %s", stratum.url);
+    }
 
     while (1)
     {
@@ -2162,20 +2354,55 @@ static void *stratum_thread(void *userdata )
            g_work_time = 0;
            pthread_mutex_unlock( &g_work_lock );
            restart_threads();
-           if ( !stratum_connect( &stratum, stratum.url )
-                || !stratum_subscribe( &stratum )
-                || !stratum_authorize( &stratum, rpc_user, rpc_pass ) )
+           
+           if (mpi_rank <= 0)
            {
-              stratum_disconnect( &stratum );
-              if (opt_retries >= 0 && ++failures > opt_retries)
-              {
-                 applog(LOG_ERR, "...terminating workio thread");
-                 tq_push(thr_info[work_thr_id].q, NULL);
-                 goto out;
-              }
-              if (!opt_benchmark)
-                  applog(LOG_ERR, "...retry after %d seconds", opt_fail_pause);
-              sleep(opt_fail_pause);
+             if ( !stratum_connect( &stratum, stratum.url )
+                  || !stratum_subscribe( &stratum )
+                  || !stratum_authorize( &stratum, rpc_user, rpc_pass ) )
+             {
+                stratum_disconnect( &stratum );
+                if (opt_retries >= 0 && ++failures > opt_retries)
+                {
+                   applog(LOG_ERR, "...terminating workio thread");
+                   tq_push(thr_info[work_thr_id].q, NULL);
+                   goto out;
+                }
+                if (!opt_benchmark)
+                    applog(LOG_ERR, "...retry after %d seconds", opt_fail_pause);
+                sleep(opt_fail_pause);
+             }
+            
+             if (mpi_rank == 0)
+             {
+                wd = (struct work_data *)malloc(sizeof(struct work_data));
+                memset(wd, 0, sizeof(struct work_data));
+                work_data_copy(wd, &stratum.work);
+                if (!opt_quiet)
+              		applog(LOG_DEBUG, "MPI root stratum send work height: %d, job_id: %s, workid: %s, txs: %s, xnonce2: %s",
+                    stratum.work.height,
+                    stratum.work.job_id ? stratum.work.job_id : "NULL",
+                    stratum.work.workid ? stratum.work.workid : "NULL",
+                    stratum.work.txs ? stratum.work.txs : "NULL",
+                    stratum.work.xnonce2 ? stratum.work.xnonce2 : "NULL");
+                MPI_Bcast(wd, sizeof(struct work_data), MPI_BYTE, 0, MPI_COMM_WORLD);
+                MPI_Barrier(MPI_COMM_WORLD);
+                free(wd);
+             }
+           } else {
+             wd = (struct work_data *)malloc(sizeof(struct work_data));
+             memset(wd, 0, sizeof(struct work_data));
+             MPI_Bcast(wd, sizeof(struct work_data), MPI_BYTE, 0, MPI_COMM_WORLD);
+             MPI_Barrier(MPI_COMM_WORLD);
+             work_copy_data(&stratum.work, wd);
+             if (!opt_quiet)
+           		  applog(LOG_DEBUG, "MPI %d stratum received work height: %d, job_id: %s, workid: %s, txs: %s, xnonce2: %s",
+                  mpi_rank, stratum.work.height,
+                  stratum.work.job_id ? stratum.work.job_id : "NULL",
+                  stratum.work.workid ? stratum.work.workid : "NULL",
+                  stratum.work.txs ? stratum.work.txs : "NULL",
+                  stratum.work.xnonce2 ? stratum.work.xnonce2 : "NULL");
+             free(wd);
            }
 
            if (jsonrpc_2)
@@ -2757,7 +2984,11 @@ BOOL WINAPI ConsoleHandler(DWORD dwType)
 static int thread_create(struct thr_info *thr, void* func)
 {
 	int err = 0;
+	size_t stacksize;
 	pthread_attr_init(&thr->attr);
+	pthread_attr_getstacksize(&thr->attr, &stacksize);
+	stacksize = 2 * stacksize;
+	pthread_attr_setstacksize(&thr->attr, stacksize);
 	err = pthread_create(&thr->pth, &thr->attr, func, thr);
 	pthread_attr_destroy(&thr->attr);
 	return err;
@@ -2882,14 +3113,24 @@ int main(int argc, char *argv[])
 	struct thr_info *thr;
 	long flags;
 	int i, err;
+  
+  /* MPI configure */
+	int rank, size, provided;
+	MPI_Init_thread(&argc, &argv, MPI_THREAD_MULTIPLE, &provided);
+	MPI_Comm_rank(MPI_COMM_WORLD, &rank);  
+	MPI_Comm_size(MPI_COMM_WORLD, &size);
 
 	pthread_mutex_init(&applog_lock, NULL);
 
-	show_credits();
+	if (rank <= 0) {
+		show_credits();
+	}
+
+	printf("MPI Processor: %d/%d\n", rank, size);
 
 	rpc_user = strdup("");
 	rpc_pass = strdup("");
-	opt_api_allow = strdup("127.0.0.1"); /* 0.0.0.0 for all ips */
+	opt_api_allow = strdup(rank == 0 ? "0.0.0.0" : "127.0.0.1"); /* 0.0.0.0 for all ips */
 
 #if defined(WIN32)
 	SYSTEM_INFO sysinfo;
@@ -2908,6 +3149,18 @@ int main(int argc, char *argv[])
 		num_cpus = 1;
 
 	parse_cmdline(argc, argv);
+  
+  if (rank == 0) {
+    opt_api_remote = 1;
+    if (!have_stratum) {
+      fprintf(stderr, "%s: no stratum supplied\n", argv[0]);
+      show_usage_and_exit(1);
+    }
+  } else {
+    // have_stratum = false;
+    opt_api_listen = 0;
+  }
+  mpi_rank = rank;
 
         if (!opt_n_threads)
                 opt_n_threads = num_cpus;
@@ -3054,6 +3307,12 @@ int main(int argc, char *argv[])
         if (!thr_hashcount)
                 return 1;
 
+	for (i = 0; i < opt_n_threads + 4; i++)
+	{
+		thr = &thr_info[i];
+		thr->mpi_rank = rank;
+		thr->mpi_size = size;
+	}
 	/* init workio thread info */
 	work_thr_id = opt_n_threads;
 	thr = &thr_info[work_thr_id];
@@ -3127,10 +3386,17 @@ int main(int argc, char *argv[])
 	}
 
 	/* start mining threads */
+	if (size > 1 && rank > 0) {
+	int worker = size - 1;
+	int threads = 0;
 	for (i = 0; i < opt_n_threads; i++)
-        {
+	{
 		thr = &thr_info[i];
 		thr->id = i;
+		if (i % worker != rank - 1) {
+			continue;
+		}
+		threads++;
 		thr->q = tq_new();
 		if (!thr->q)
 			return 1;
@@ -3143,11 +3409,14 @@ int main(int argc, char *argv[])
 
 	applog(LOG_INFO, "%d miner threads started, "
 		"using '%s' algorithm.",
-		opt_n_threads,
+		threads,
 		algo_names[opt_algo]);
+
+	}
 
 	/* main loop - simply wait for workio thread to exit */
 	pthread_join(thr_info[work_thr_id].pth, NULL);
 	applog(LOG_WARNING, "workio thread dead, exiting.");
+	MPI_Finalize();
 	return 0;
 }

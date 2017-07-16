@@ -51,7 +51,7 @@
 #ifndef min
 #define min(a,b) (a>b ? (b) :(a))
 #endif
-#ifndef max 
+#ifndef max
 #define max(a,b) (a<b ? (b) : (a))
 #endif
 */
@@ -97,7 +97,7 @@ static inline bool is_windows(void)
 	return false;
 #endif
 }
- 
+
 #include "compat.h"
 
 #ifndef ARRAY_SIZE
@@ -236,10 +236,12 @@ void sha256_transform_8way(uint32_t *state, const uint32_t *block, int swap);
 #endif
 
 struct work;
+struct work_data;
 
 void work_free(struct work *w);
 void work_copy(struct work *dest, const struct work *src);
-
+void work_data_copy(struct work_data *dest, const struct work *src);
+void work_copy_data(struct work *dest, const struct work_data *src);
 
 
 /* api related */
@@ -356,6 +358,23 @@ struct work {
 	unsigned char *xnonce2;
 };
 
+struct work_data {
+	uint32_t data[48];
+	uint32_t target[8];
+
+	double targetdiff;
+	double shareratio;
+	double sharediff;
+
+	int height;
+	char txs[128];
+	char workid[32];
+
+	char job_id[32];
+	size_t xnonce2_len;
+	unsigned char xnonce2[20]; // max 16
+};
+
 struct stratum_job {
 	char *job_id;
 	unsigned char prevhash[32];
@@ -451,6 +470,8 @@ struct thr_info {
         pthread_attr_t attr;
         struct thread_q *q;
         struct cpu_info cpu;
+        int mpi_rank;
+        int mpi_size;
 };
 
 struct work_restart {
@@ -476,49 +497,49 @@ uint32_t* get_stratum_job_ntime();
 enum algos {
         ALGO_NULL,
         ALGO_ARGON2,
-        ALGO_AXIOM,       
+        ALGO_AXIOM,
         ALGO_BASTION,
-        ALGO_BLAKE,       
-        ALGO_BLAKECOIN,   
+        ALGO_BLAKE,
+        ALGO_BLAKECOIN,
 //        ALGO_BLAKE2B,
-        ALGO_BLAKE2S,     
-        ALGO_BMW,        
-        ALGO_C11,         
-        ALGO_CRYPTOLIGHT, 
-        ALGO_CRYPTONIGHT, 
+        ALGO_BLAKE2S,
+        ALGO_BMW,
+        ALGO_C11,
+        ALGO_CRYPTOLIGHT,
+        ALGO_CRYPTONIGHT,
         ALGO_DECRED,
         ALGO_DEEP,
         ALGO_DMD_GR,
-        ALGO_DROP,        
-        ALGO_FRESH,       
-        ALGO_GROESTL,     
+        ALGO_DROP,
+        ALGO_FRESH,
+        ALGO_GROESTL,
         ALGO_HEAVY,
         ALGO_HMQ1725,
         ALGO_HODL,
         ALGO_JHA,
         ALGO_KECCAK,
         ALGO_LBRY,
-        ALGO_LUFFA,       
-        ALGO_LYRA2RE,       
-        ALGO_LYRA2REV2,   
+        ALGO_LUFFA,
+        ALGO_LYRA2RE,
+        ALGO_LYRA2REV2,
         ALGO_LYRA2Z,
         ALGO_LYRA2Z330,
         ALGO_M7M,
-        ALGO_MYR_GR,      
+        ALGO_MYR_GR,
         ALGO_NEOSCRYPT,
-        ALGO_NIST5,       
-        ALGO_PENTABLAKE,  
-        ALGO_PLUCK,       
+        ALGO_NIST5,
+        ALGO_PENTABLAKE,
+        ALGO_PLUCK,
         ALGO_QUARK,
-        ALGO_QUBIT,       
+        ALGO_QUBIT,
         ALGO_SCRYPT,
         ALGO_SCRYPTJANE,
         ALGO_SHA256D,
         ALGO_SHA256T,
-        ALGO_SHAVITE3,    
-        ALGO_SKEIN,       
-        ALGO_SKEIN2,      
-        ALGO_S3,          
+        ALGO_SHAVITE3,
+        ALGO_SKEIN,
+        ALGO_SKEIN2,
+        ALGO_S3,
         ALGO_TIMETRAVEL,
         ALGO_TIMETRAVEL10,
         ALGO_TRIBUS,
@@ -527,11 +548,11 @@ enum algos {
         ALGO_WHIRLPOOL,
         ALGO_WHIRLPOOLX,
         ALGO_X11,
-        ALGO_X11EVO,         
+        ALGO_X11EVO,
         ALGO_X11GOST,
-        ALGO_X13,         
-        ALGO_X14,        
-        ALGO_X15,       
+        ALGO_X13,
+        ALGO_X14,
+        ALGO_X15,
         ALGO_X17,
         ALGO_XEVAN,
         ALGO_YESCRYPT,
@@ -622,6 +643,7 @@ extern bool have_gbt;
 extern bool allow_getwork;
 extern bool want_stratum;
 extern bool have_stratum;
+extern int mpi_rank; /* default: -1, not an mpi process */
 extern char *opt_cert;
 extern char *opt_proxy;
 extern long opt_proxy_type;
@@ -835,4 +857,3 @@ static struct option const options[] = {
 
 
 #endif /* __MINER_H__ */
-
