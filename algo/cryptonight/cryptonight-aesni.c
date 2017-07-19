@@ -1,4 +1,6 @@
+#if defined(__XOP__) && (defined(__GNUC__) || defined(__clang__))
 #include <x86intrin.h>
+#endif
 #include <memory.h>
 #include "cryptonight.h"
 #include "miner.h"

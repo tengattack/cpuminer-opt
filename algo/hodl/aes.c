@@ -1,5 +1,7 @@
 #include <stdint.h>
+#if defined(__XOP__) && (defined(__GNUC__) || defined(__clang__))
 #include <x86intrin.h>
+#endif
 #include "wolf-aes.h"
 #include "miner.h"
 

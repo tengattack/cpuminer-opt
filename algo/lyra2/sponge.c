@@ -22,7 +22,12 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#if defined(HAVE_IMMINTRIN_H)
 #include <immintrin.h>
+#else
+#include <tmmintrin.h>
+#include <wmmintrin.h>
+#endif
 #include "sponge.h"
 #include "lyra2.h"
 

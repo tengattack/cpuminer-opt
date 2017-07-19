@@ -17,7 +17,12 @@
 #include <stdio.h>
 #include <inttypes.h>
 
+#if defined(HAVE_IMMINTRIN_H)
 #include <immintrin.h>
+#else
+#include <tmmintrin.h>
+#include <wmmintrin.h>
+#endif
 
 #include "argon2.h"
 #include "cores.h"

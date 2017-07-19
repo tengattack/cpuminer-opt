@@ -2,7 +2,15 @@
 #define __WOLF_AES_H
 
 #include <stdint.h>
+#if defined(HAVE_IMMINTRIN_H)
+#include <immintrin.h>
+#else
+#include <tmmintrin.h>
+#include <wmmintrin.h>
+#endif
+#if defined(__XOP__) && (defined(__GNUC__) || defined(__clang__))
 #include <x86intrin.h>
+#endif
 
 void ExpandAESKey256(__m128i *keys, const __m128i *KeyBuf);
 

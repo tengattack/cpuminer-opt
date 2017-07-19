@@ -9,7 +9,12 @@
 #ifndef __hash_h
 #define __hash_h
 
+#if defined(HAVE_IMMINTRIN_H)
 #include <immintrin.h>
+#else
+#include <tmmintrin.h>
+#include <wmmintrin.h>
+#endif
 
 #include <stdio.h>
 #if defined(_WIN64) || defined(__WINDOWS__)

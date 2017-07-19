@@ -21,6 +21,8 @@ AC_PROG_CXX
 
 dnl Checks for header files
 AC_HEADER_STDC
+AC_CHECK_HEADER([immintrin.h],
+    [AC_DEFINE([HAVE_IMMINTRIN_H], [1], [found immintrin.h])])
 AC_CHECK_HEADERS([sys/endian.h sys/param.h syslog.h])
 # sys/sysctl.h requires sys/types.h on FreeBSD
 # sys/sysctl.h requires sys/param.h on OpenBSD

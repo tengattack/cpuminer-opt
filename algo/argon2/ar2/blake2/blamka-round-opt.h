@@ -6,8 +6,12 @@
 #if defined(_MSC_VER)
 #include <intrin.h>
 #endif
-
+#if defined(HAVE_IMMINTRIN_H)
 #include <immintrin.h>
+#else
+#include <tmmintrin.h>
+#include <wmmintrin.h>
+#endif
 #if defined(__XOP__) && (defined(__GNUC__) || defined(__clang__))
 #include <x86intrin.h>
 #endif

@@ -58,7 +58,7 @@
 //#include <wmmintrin.h> //AES
 //#include <immintrin.h> //AVX
 #define OPT_COMPATIBLE
-#elif defined(__GNUC__) && defined(__x86_64__)
+#elif defined(__XOP__) && (defined(__GNUC__) || defined(__clang__))
 #include <x86intrin.h>
 #define _VECTOR
 #endif

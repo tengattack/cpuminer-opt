@@ -2,7 +2,12 @@
 // AVX support is required to include this header file, AVX2 optional.
 
 #include <inttypes.h>
+#if defined(HAVE_IMMINTRIN_H)
 #include <immintrin.h>
+#else
+#include <tmmintrin.h>
+#include <wmmintrin.h>
+#endif
 
 // Use these overlays to access the same data in memory as different types
 //
