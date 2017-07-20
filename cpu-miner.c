@@ -1477,6 +1477,7 @@ static bool get_work(struct thr_info *thr, struct work *work)
 		static struct work_data wd;
 		static int flag = 1;
 		static MPI_Request req = MPI_REQUEST_NULL;
+	rebcast_l:
 		if (flag) {
 			memset(&wd, 0, sizeof(wd));
 			if (MPI_Ibcast(&wd, sizeof(wd), MPI_BYTE, 0, MPI_COMM_WORLD, &req) == MPI_SUCCESS) {
@@ -1494,6 +1495,7 @@ static bool get_work(struct thr_info *thr, struct work *work)
 						work->txs ? work->txs : "NULL",
 						work->xnonce2 ? work->xnonce2 : "NULL");
 				//MPI_Barrier(MPI_COMM_WORLD);
+				goto rebcast_l;
 			}
 		}
 		return true;
