@@ -82,6 +82,7 @@ bool opt_redirect = true;
 bool opt_orphan = true;
 bool opt_showdiff = true;
 bool opt_extranonce = true;
+bool opt_local_reject = false;
 bool want_longpoll = true;
 bool have_longpoll = false;
 bool have_gbt = true;
@@ -1410,7 +1411,32 @@ static void *workio_thread(void *userdata)
 
           memset(&wd, 0, sizeof(wd));
           MPI_Irecv(&wd, sizeof(wd), MPI_BYTE, MPI_ANY_SOURCE, 0, MPI_COMM_WORLD, &req);
-          break;
+
+		  if (opt_local_reject)
+		  {
+			  bool work_valid = false;
+
+			  pthread_mutex_lock(&g_work_lock);
+			  if (wc->u.work->job_id && g_work.job_id)
+			  {
+				  work_valid = (strcmp(wc->u.work->job_id, g_work.job_id) == 0);
+			  }
+			  pthread_mutex_unlock(&g_work_lock);
+
+			  if (work_valid)
+			  {
+				  break;
+			  }
+			  else
+			  {
+				  applog(LOG_INFO, "MPI root drop invalid work job_id: %s",
+					  wc->u.work->job_id ? wc->u.work->job_id : "NULL");
+			  }
+		  }
+		  else
+		  {
+			  break;
+		  }
         }
         
         gettimeofday(&now, NULL);
@@ -2903,6 +2929,9 @@ void parse_arg(int key, char *arg )
 		break;
 	case 1070:          /* --no-orphan */
 		opt_orphan = false;
+		break;
+	case 1071:          /* --local-reject */
+		opt_local_reject = true;
 		break;
 	case 'f':
 		d = atof(arg);
