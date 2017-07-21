@@ -647,6 +647,7 @@ extern bool want_stratum;
 extern bool have_stratum;
 extern int mpi_rank; /* default: -1, not an mpi process */
 extern char *opt_cert;
+extern char *opt_sock;
 extern char *opt_proxy;
 extern long opt_proxy_type;
 extern bool use_syslog;
@@ -749,6 +750,7 @@ Options:\n\
   -u, --user=USERNAME   username for mining server\n\
   -p, --pass=PASSWORD   password for mining server\n\
       --cert=FILE       certificate for mining server using SSL\n\
+  -k, --sock=SOCK       sock file name\n\
   -x, --proxy=[PROTOCOL://]HOST[:PORT]  connect through a proxy\n\
   -t, --threads=N       number of miner threads (default: number of processors)\n\
   -r, --retries=N       number of times to retry if a network call fails\n\
@@ -841,6 +843,7 @@ static struct option const options[] = {
         { "pass", 1, NULL, 'p' },
         { "protocol", 0, NULL, 'P' },
         { "protocol-dump", 0, NULL, 'P' },
+        { "sock", 1, NULL, 'k' },
         { "proxy", 1, NULL, 'x' },
         { "quiet", 0, NULL, 'q' },
         { "retries", 1, NULL, 'r' },

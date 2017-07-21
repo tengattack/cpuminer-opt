@@ -118,6 +118,7 @@ static unsigned char pk_script[25] = { 0 };
 static size_t pk_script_size = 0;
 static char coinbase_sig[101] = { 0 };
 char *opt_cert;
+char *opt_sock = NULL;
 char *opt_proxy;
 long opt_proxy_type;
 struct thr_info *thr_info;
@@ -169,7 +170,7 @@ static char const short_options[] =
 #ifdef HAVE_SYSLOG_H
 	"S"
 #endif
-	"a:b:Bc:CDf:hm:n:p:Px:qr:R:s:t:T:o:u:O:V";
+	"a:b:Bc:CDf:hk:m:n:p:Px:qr:R:s:t:T:o:u:O:V";
 
 static struct work g_work = {{ 0 }};
 //static struct work tmp_work;
@@ -2649,7 +2650,7 @@ void strhide(char *s)
 	while (*s) *s++ = '\0';
 }
 
-void parse_arg(int key, char *arg )
+void parse_arg(int key, char *arg)
 {
 	char *p;
 	int v, i;
@@ -2855,6 +2856,15 @@ void parse_arg(int key, char *arg )
 		free(rpc_pass);
 		rpc_pass = strdup(++p);
 		strhide(p);
+		break;
+	case 'k':			/* --sock */
+		p = strchr(arg, '/');
+		if (p) {
+			fprintf(stderr, "invalid sock name -- '%s'\n", arg);
+			show_usage_and_exit(1);
+		}
+		free(opt_sock);
+		opt_sock = strdup(arg);
 		break;
 	case 'x':			/* --proxy */
 		if (!strncasecmp(arg, "socks4://", 9))

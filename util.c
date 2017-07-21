@@ -26,6 +26,7 @@
 #include <curl/curl.h>
 #include <time.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <math.h>
 //#include <syslog.h>
 #if defined(WIN32)
@@ -33,9 +34,11 @@
 #include <mstcpip.h>
 #include "compat/winansi.h"
 #else
+#include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <netdb.h>
 #endif
 
 #ifndef _MSC_VER
@@ -48,6 +51,12 @@
 #include "algo-gate-api.h"
 
 //extern pthread_mutex_t stats_lock;
+
+struct fake_sock {
+	char path[256];
+	time_t mtime;
+	pthread_mutex_t lock;
+};
 
 struct data_buffer {
 	void		*buf;
@@ -1009,6 +1018,185 @@ static bool send_line(curl_socket_t sock, char *s)
 	return true;
 }
 
+static bool fake_send_wait(struct fake_sock *fsock)
+{
+	int fd, rc, size;
+	struct stat st;
+	char buf[1024];
+	char cflag = 0;
+	time_t rstart;
+
+	time(&rstart);
+
+
+	//debug
+	printf("fake_send_wait\n");
+
+	while (time(NULL) - rstart < 120) {
+		rc = stat(fsock->path, &st);
+		if (rc == 0) {
+			if (fsock->mtime == st.st_mtime) {
+				goto next_l;
+			}
+			fsock->mtime = st.st_mtime;
+		} else {
+			goto next_l;
+		}
+
+		fd = open(fsock->path, O_RDONLY);
+		if (fd < 0) {
+			goto next_l;
+		}
+		size = read(fd, buf, sizeof(buf) - 4);
+		close(fd);
+
+		// trim end
+		while (size > 0 && isspace(buf[size - 1])) {
+			size--;
+		}
+		if (size < 4) {
+			goto next_l;
+                }
+
+		buf[size] = 0;
+
+		if (strncmp(buf, "-> ", 3) == 0 || strncmp(buf, "<- ", 3) == 0) {
+			if (strncmp(buf, "<- ", 3) == 0) {
+				//return false
+				// reset mtime for next time access
+				fsock->mtime = 0;
+				printf("fake_send_wait -> o\n");
+				return true;
+			} else if (size > 4) {
+				goto next_l;
+			}
+			/*if (size > 4) {
+				// data error
+				cflag = 'x';
+				break;
+			}*/
+
+			if (buf[3] != 'o') {
+				if (buf[3] != 'x') {
+					cflag = 'x';
+					break;
+				}
+				printf("fake_send_wait -> x\n");
+				return false;
+			} else {
+				printf("fake_send_wait -> o\n");
+				return true;
+			}
+		} else {
+			cflag = 'x';
+			break;
+		}
+	next_l:
+		usleep(100 * 1000);
+	}
+
+	if (!cflag) {
+		cflag = 't';
+	}
+
+	fd = open(fsock->path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+	if (fd >= 0) {
+		char fsst[] = "-> t\n";
+		fsst[3] = cflag;
+		write(fd, fsst, 5);
+		close(fd);
+
+		rc = stat(fsock->path, &st);
+		if (rc == 0) {
+			fsock->mtime = st.st_mtime;
+		}
+	}
+
+	printf("fake_send_wait -> %c\n", cflag);
+	return false;
+}
+
+static bool fake_send_line(struct fake_sock *fsock, char *s)
+{
+	int len, size;
+	int fd;
+	int rc;
+	struct stat st;
+	char buf[1024];
+	time_t rstart;
+
+	time(&rstart);
+
+	//debug
+	printf("fake_send_line\n");
+	
+	len = (int) strlen(s);
+        s[len++] = '\n';
+
+
+	while (time(NULL) - rstart < 120) {
+		fd = open(fsock->path, O_RDONLY);
+		if (fd < 0) {
+			usleep(100 * 1000);
+			continue;
+    		}
+		size = read(fd, buf, sizeof(buf) - 4);
+		close(fd);
+
+		// trim end
+		while (size > 0 && isspace(buf[size - 1])) {
+			size--;
+		}
+		if (size > 0 && size < 4) {
+			usleep(100 * 1000);
+                        continue;
+		}
+
+		buf[size] = 0;
+		if (size == 0 || strncmp(buf, "-> ", 3) == 0 || strncmp(buf, "<- ", 3) == 0) {
+			if (size > 4) {
+				usleep(100 * 1000);
+				continue;
+			}
+			if (size > 0 && strncmp(buf, "-> ", 3) == 0) {
+				if (buf[3] != 'o' && buf[3] != 't') {
+					// connection close
+					return false;
+				}
+			} else if (size > 0) {
+				// <-
+				if (buf[3] != 'o' && buf[3] != 't') {
+					return false;
+				}
+			}
+
+			fd = open(fsock->path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+			if (fd < 0) {
+				return false;
+			}
+			sprintf(buf, "-> %s\n", s);
+			// debug
+			printf("%s", buf);
+			write(fd, buf, strlen(buf));
+			close(fd);
+
+			/*rc = stat(fsock->path, &st);
+			if (rc == 0) {
+				fsock->mtime = st.st_mtime;
+			}*/
+
+			// send wait
+			return fake_send_wait(fsock);
+		} else {
+			return false;
+		}
+		usleep(100 * 1000);
+	}
+
+	// timeout
+	return false;
+}
+
 bool stratum_send_line(struct stratum_ctx *sctx, char *s)
 {
 	bool ret = false;
@@ -1016,8 +1204,12 @@ bool stratum_send_line(struct stratum_ctx *sctx, char *s)
 	if (opt_protocol)
 		applog(LOG_DEBUG, "> %s", s);
 
+	printf("locking send lock\n");
 	pthread_mutex_lock(&sctx->sock_lock);
-	ret = send_line(sctx->sock, s);
+	//ret = send_line(sctx->sock, s);
+	pthread_mutex_lock(&((struct fake_sock *)sctx->curl_url)->lock);
+	ret = fake_send_line((struct fake_sock *)sctx->curl_url, s);
+	pthread_mutex_unlock(&((struct fake_sock *)sctx->curl_url)->lock);
 	pthread_mutex_unlock(&sctx->sock_lock);
 
 	return ret;
@@ -1025,6 +1217,7 @@ bool stratum_send_line(struct stratum_ctx *sctx, char *s)
 
 static bool socket_full(curl_socket_t sock, int timeout)
 {
+/*
 	struct timeval tv;
 	fd_set rd;
 
@@ -1035,6 +1228,8 @@ static bool socket_full(curl_socket_t sock, int timeout)
 	if (select((int)(sock + 1), &rd, NULL, NULL, &tv) > 0)
 		return true;
 	return false;
+*/
+	return true;
 }
 
 bool stratum_socket_full(struct stratum_ctx *sctx, int timeout)
@@ -1058,6 +1253,130 @@ static void stratum_buffer_append(struct stratum_ctx *sctx, const char *s)
 	strcpy(sctx->sockbuf + old, s);
 }
 
+static int fake_recv(struct fake_sock *fsock, char *buf, int len, int flags)
+{
+	int fd, size;
+	int rc;
+	struct stat st;
+	bool recv_timeout;
+	time_t rstart;
+
+	time(&rstart);
+
+	while (time(NULL) - rstart < 20) {
+		if (pthread_mutex_trylock(&fsock->lock) != 0) {
+			return -3;
+		}
+		rc = stat(fsock->path, &st);
+		if (rc == 0) {
+			if (fsock->mtime == st.st_mtime) {
+				goto next_l;
+			}
+			fsock->mtime = st.st_mtime;
+		} else {
+			goto next_l;
+		}
+
+		fd = open(fsock->path, O_RDONLY);
+		if (fd < 0) {
+			goto next_l;
+    		}
+		size = read(fd, buf, len);
+		close(fd);
+
+		// trim end
+		while (size > 0 && isspace(buf[size - 1])) {
+			size--;
+		}
+		if (size < 4) {
+			goto next_l;
+		}
+
+		buf[size] = 0;
+		recv_timeout = false;
+
+		if (strncmp(buf, "-> ", 3) == 0 || strncmp(buf, "<- ", 3) == 0) {
+			if (strncmp(buf, "-> ", 3) == 0) {
+				if (size > 4) {
+					// sending
+					goto next_l;
+				} else if (buf[3] != 'o' && buf[3] != 't') {
+					// connection close
+					goto error_l;
+				} else {
+					// sent, but no data
+					goto next_l;
+				}
+			} else {
+				if (size == 4) {
+					printf("fake_recv flag: %c\n", buf[3]);
+					if (buf[3] == 't') {
+						recv_timeout = true;
+					}
+					if (buf[3] == 'o' || buf[3] == 't') {
+						// no data
+						goto next_l;
+					} else {
+						// connection close
+						goto error_l;
+					}
+				}
+			}
+
+			memmove(buf, buf + 3, size - 3);
+			size -= 3;
+
+			// debug
+			buf[size] = 0;
+			printf("<- %s\n", buf);
+
+			fd = open(fsock->path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+			if (fd < 0) {
+				printf("write o failed!\n");
+				goto next_l;
+			}
+			write(fd, "<- o\n", 5);
+			close(fd);
+
+			rc = stat(fsock->path, &st);
+			if (rc == 0) {
+				fsock->mtime = st.st_mtime;
+			}
+
+			buf[size] = '\n';
+			buf[size + 1] = 0;
+			pthread_mutex_unlock(&fsock->lock);
+			return size + 1;
+		} else {
+			goto error_l;
+		}
+	next_l:
+		pthread_mutex_unlock(&fsock->lock);
+		usleep(100 * 1000);
+		continue;
+	error_l:
+		pthread_mutex_unlock(&fsock->lock);
+		return -1;
+	}
+
+	if (!recv_timeout) {
+		pthread_mutex_lock(&fsock->lock);
+		fd = open(fsock->path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+		if (fd >= 0) {
+			write(fd, "<- t\n", 5);
+			close(fd);
+
+			rc = stat(fsock->path, &st);
+			if (rc == 0) {
+				fsock->mtime = st.st_mtime;
+			}
+		}
+		pthread_mutex_unlock(&fsock->lock);
+	}
+
+	return -2;
+}
+
 char *stratum_recv_line(struct stratum_ctx *sctx)
 {
 	ssize_t len, buflen;
@@ -1077,19 +1396,23 @@ char *stratum_recv_line(struct stratum_ctx *sctx)
 			ssize_t n;
 
 			memset(s, 0, RBUFSIZE);
-			n = recv(sctx->sock, s, RECVSIZE, 0);
+			//n = recv(sctx->sock, s, RECVSIZE, 0);
+			n = fake_recv((struct fake_sock *)sctx->curl_url, s, RBUFSIZE, 0);
 			if (!n) {
 				ret = false;
 				break;
 			}
 			if (n < 0) {
-				if (!socket_blocks() || !socket_full(sctx->sock, 1)) {
+				if (n == -1) {
+				//if (!socket_blocks() || !socket_full(sctx->sock, 1)) {
 					ret = false;
 					break;
+				} else {
+					// blocks
 				}
 			} else
 				stratum_buffer_append(sctx, s);
-		} while (time(NULL) - rstart < 60 && !strstr(sctx->sockbuf, "\n"));
+		} while (time(NULL) - rstart < 180 && !strstr(sctx->sockbuf, "\n"));
 
 		if (!ret) {
 			applog(LOG_ERR, "stratum_recv_line failed");
@@ -1131,6 +1454,16 @@ bool stratum_connect(struct stratum_ctx *sctx, const char *url)
 {
 	CURL *curl;
 	int rc;
+	int client_socket;
+	struct hostent        *he;
+	struct sockaddr_in  server;
+        struct addrinfo hints, *servinfo, *p;
+
+        memset(&hints, 0, sizeof(hints));
+        //hints.ai_family = AF_UNSPEC;
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+	hints.ai_protocol = IPPROTO_TCP;
 
 	pthread_mutex_lock(&sctx->sock_lock);
 	if (sctx->curl)
@@ -1152,33 +1485,54 @@ bool stratum_connect(struct stratum_ctx *sctx, const char *url)
 		free(sctx->url);
 		sctx->url = strdup(url);
 	}
-	free(sctx->curl_url);
-	sctx->curl_url = (char*) malloc(strlen(url));
-	sprintf(sctx->curl_url, "http%s", strstr(url, "://"));
-
-	if (opt_protocol)
-		curl_easy_setopt(curl, CURLOPT_VERBOSE, 1);
-	curl_easy_setopt(curl, CURLOPT_URL, sctx->curl_url);
-	curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1);
-	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30);
-	curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, sctx->curl_err_str);
-	curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1);
-	curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1);
-	if (opt_proxy) {
-		curl_easy_setopt(curl, CURLOPT_PROXY, opt_proxy);
-		curl_easy_setopt(curl, CURLOPT_PROXYTYPE, opt_proxy_type);
+	if (sctx->curl_url) {
+		pthread_mutex_destroy(&((struct fake_sock *) sctx->curl_url)->lock);
 	}
-	curl_easy_setopt(curl, CURLOPT_HTTPPROXYTUNNEL, 1);
+	free(sctx->curl_url);
+
+	// fake sock
+	char wd[1024];
+	getcwd(wd, sizeof(wd));
+
+	sctx->curl_url = (char*) malloc(sizeof(struct fake_sock));
+	sprintf(((struct fake_sock *) sctx->curl_url)->path, "%s/%s", wd, opt_sock ? opt_sock : "sock");
+	((struct fake_sock *) sctx->curl_url)->mtime = 0;
+	pthread_mutex_init(&((struct fake_sock *) sctx->curl_url)->lock, NULL);
+
+	rc = open(((struct fake_sock *) sctx->curl_url)->path,
+		O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+	if (rc < 0) {
+		return false;
+	}
+	close(rc);
+	//sctx->curl_url = (char*) malloc(strlen(url));
+	//sprintf(sctx->curl_url, "http%s", strstr(url, "://"));
+
+        //printf("url: %s\n", sctx->curl_url);
+	//if (opt_protocol)
+		//curl_easy_setopt(curl, CURLOPT_VERBOSE, 1);
+	//curl_easy_setopt(curl, CURLOPT_URL, sctx->curl_url);
+	//curl_easy_setopt(curl, CURLOPT_FRESH_CONNECT, 1);
+	//curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 30);
+	//curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, sctx->curl_err_str);
+	//curl_easy_setopt(curl, CURLOPT_NOSIGNAL, 1);
+	//curl_easy_setopt(curl, CURLOPT_TCP_NODELAY, 1);
+	if (opt_proxy) {
+		//curl_easy_setopt(curl, CURLOPT_PROXY, opt_proxy);
+		//curl_easy_setopt(curl, CURLOPT_PROXYTYPE, opt_proxy_type);
+	}
+	//curl_easy_setopt(curl, CURLOPT_HTTPPROXYTUNNEL, 1);
 #if LIBCURL_VERSION_NUM >= 0x070f06
-	curl_easy_setopt(curl, CURLOPT_SOCKOPTFUNCTION, sockopt_keepalive_cb);
+	//curl_easy_setopt(curl, CURLOPT_SOCKOPTFUNCTION, sockopt_keepalive_cb);
 #endif
 #if LIBCURL_VERSION_NUM >= 0x071101
-	curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, opensocket_grab_cb);
-	curl_easy_setopt(curl, CURLOPT_OPENSOCKETDATA, &sctx->sock);
+	//curl_easy_setopt(curl, CURLOPT_OPENSOCKETFUNCTION, opensocket_grab_cb);
+	//curl_easy_setopt(curl, CURLOPT_OPENSOCKETDATA, &sctx->sock);
 #endif
-	curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 1);
+	//curl_easy_setopt(curl, CURLOPT_CONNECT_ONLY, 1);
 
-	rc = curl_easy_perform(curl);
+	//rc = curl_easy_perform(curl);
+	rc = 0;
 	if (rc) {
 		applog(LOG_ERR, "Stratum connection failed: %s", sctx->curl_err_str);
 		curl_easy_cleanup(curl);
@@ -1186,11 +1540,57 @@ bool stratum_connect(struct stratum_ctx *sctx, const char *url)
 		return false;
 	}
 
-#if LIBCURL_VERSION_NUM < 0x071101
+//#if LIBCURL_VERSION_NUM < 0x071101
 	/* CURLINFO_LASTSOCKET is broken on Win64; only use it as a last resort */
-	curl_easy_getinfo(curl, CURLINFO_LASTSOCKET, (long *)&sctx->sock);
-#endif
+	//curl_easy_getinfo(curl, CURLINFO_LASTSOCKET, (long *)&sctx->sock);
+//#endif
+        
+	/*
+	if ((he = gethostbyname("cryptonight.hk.nicehash.com")) == NULL) {
+		fprintf(stderr, "gethostbyname: %s\n", "cryptonight.hk.nicehash.com");
+		return false;
+	}
 
+	memcpy(&server.sin_addr, he->h_addr_list[0], he->h_length);
+	server.sin_family = AF_INET;
+	server.sin_port = htons(3355);
+
+	if ((client_socket = socket(hints.ai_family, hints.ai_socktype, hints.ai_protocol)) == -1) {
+		return false;
+	}
+
+	if (connect(client_socket, (struct sockaddr *)&server, sizeof(server))) {
+		close(client_socket);
+		return false;
+	}
+
+	sctx->sock = (curl_socket_t)client_socket;
+	*/
+	sctx->sock = NULL;
+	
+	//if ((rc = getaddrinfo("cryptonight.hk.nicehash.com", "3355", &hints, &servinfo)) != 0) {
+        //	fprintf(stderr, "getaddrinfo: %s\n", gai_strerror(rc));
+        //	return false;
+	//}
+
+	/*for (p=servinfo; p != NULL; p = p->ai_next) {
+		if ((client_socket = socket(p->ai_family, p->ai_socktype, p->ai_protocol)) == -1) {
+			continue;
+		}
+		if (connect(client_socket, p->ai_addr, p->ai_addrlen) == -1) {
+			close(client_socket);
+			continue;
+		}
+		sctx->sock = (curl_socket_t)client_socket;
+		break;
+	}
+
+	if (p == NULL) {
+		fprintf(stderr, "Couldn't connect to the server\n.");
+		return false;
+	}*/
+
+	printf("fake_connected\n");
 	return true;
 }
 
@@ -1200,6 +1600,7 @@ void stratum_disconnect(struct stratum_ctx *sctx)
 	if (sctx->curl) {
 		curl_easy_cleanup(sctx->curl);
 		sctx->curl = NULL;
+		close(sctx->sock);
 		sctx->sockbuf[0] = '\0';
 	}
 	pthread_mutex_unlock(&sctx->sock_lock);
