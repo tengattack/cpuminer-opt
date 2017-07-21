@@ -79,6 +79,7 @@ bool opt_debug_diff = false;
 bool opt_protocol = false;
 bool opt_benchmark = false;
 bool opt_redirect = true;
+bool opt_orphan = true;
 bool opt_showdiff = true;
 bool opt_extranonce = true;
 bool want_longpoll = true;
@@ -1473,7 +1474,7 @@ static bool get_work(struct thr_info *thr, struct work *work)
 		work->data[31] = 0x00000280;  // extraheader not used for jr2
 		return true;
 	}
-	if (g_mpi_worker_only && thr->mpi_rank > 0) {
+	if (!have_stratum && g_mpi_worker_only && thr->mpi_rank > 0) {
 		static struct work_data wd;
 		static int flag = 1;
 		static MPI_Request req = MPI_REQUEST_NULL;
@@ -2041,28 +2042,29 @@ out:
 
 void mpi_worker(int rank, int size, struct thr_info *thr)
 {
-	struct work_data *wd = (struct work_data *) calloc(1, sizeof(*wd));
-	MPI_Request req = MPI_REQUEST_NULL;
-
 	applog(LOG_INFO, "MPI %d ready to mining", rank);
 
-	pthread_mutex_lock(&g_work_lock);
+	if (!have_stratum) {
+		struct work_data *wd = (struct work_data *) calloc(1, sizeof(*wd));
+		MPI_Request req = MPI_REQUEST_NULL;
+		pthread_mutex_lock(&g_work_lock);
 
-	MPI_Ibcast(wd, sizeof(*wd), MPI_BYTE, 0, MPI_COMM_WORLD, &req);
-	MPI_Wait(&req, MPI_STATUS_IGNORE);
-	//MPI_Barrier(MPI_COMM_WORLD);
+		MPI_Ibcast(wd, sizeof(*wd), MPI_BYTE, 0, MPI_COMM_WORLD, &req);
+		MPI_Wait(&req, MPI_STATUS_IGNORE);
+		//MPI_Barrier(MPI_COMM_WORLD);
 
-	work_copy_data(&g_work, wd);
-	if (opt_protocol)
-		applog(LOG_DEBUG, "MPI %d stratum received work height: %d, job_id: %s, workid: %s, txs: %s, xnonce2: %s",
-			rank, g_work.height,
-			g_work.job_id ? g_work.job_id : "NULL",
-			g_work.workid ? g_work.workid : "NULL",
-			g_work.txs ? g_work.txs : "NULL",
-			g_work.xnonce2 ? g_work.xnonce2 : "NULL");
+		work_copy_data(&g_work, wd);
+		if (opt_protocol)
+			applog(LOG_DEBUG, "MPI %d stratum received work height: %d, job_id: %s, workid: %s, txs: %s, xnonce2: %s",
+				rank, g_work.height,
+				g_work.job_id ? g_work.job_id : "NULL",
+				g_work.workid ? g_work.workid : "NULL",
+				g_work.txs ? g_work.txs : "NULL",
+				g_work.xnonce2 ? g_work.xnonce2 : "NULL");
 
-	pthread_mutex_unlock(&g_work_lock);
-	free(wd);
+		pthread_mutex_unlock(&g_work_lock);
+		free(wd);
+	}
 
 	miner_loop(thr);
 }
@@ -2899,6 +2901,9 @@ void parse_arg(int key, char *arg )
 		}
 		strcpy(coinbase_sig, arg);
 		break;
+	case 1070:          /* --no-orphan */
+		opt_orphan = false;
+		break;
 	case 'f':
 		d = atof(arg);
 		if (d == 0.)	/* --diff-factor */
@@ -3246,10 +3251,12 @@ int main(int argc, char *argv[])
 			}
 			if (worker_threads <= 1) {
 				g_mpi_worker_only = true;
-				printf("MPI %d stratum thread disabled\n", rank);
-				have_stratum = false;
-				want_stratum = false;
-				want_longpoll = false;
+				if (!opt_orphan) {
+					printf("MPI %d orphan thread disabled\n", rank);
+					have_stratum = false;
+					want_stratum = false;
+					want_longpoll = false;
+				}
 			}
 		}
 		// disable api for mpi worker

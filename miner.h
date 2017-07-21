@@ -636,6 +636,7 @@ extern bool opt_showdiff;
 extern bool opt_extranonce;
 extern bool opt_quiet;
 extern bool opt_redirect;
+extern bool opt_orphan;
 extern int opt_timeout;
 extern bool want_longpoll;
 extern bool have_longpoll;
@@ -768,6 +769,7 @@ Options:\n\
       --no-stratum      disable X-Stratum support\n\
       --no-extranonce   disable Stratum extranonce support\n\
       --no-redirect     ignore requests to change the URL of the mining server\n\
+      --no-orphan       disable orphan threads for single mpi worker\n\
   -q, --quiet           disable per-thread hashmeter output\n\
       --no-color        disable colored output\n\
   -D, --debug           enable debug output\n\
@@ -828,6 +830,7 @@ static struct option const options[] = {
         { "no-getwork", 0, NULL, 1010 },
         { "no-longpoll", 0, NULL, 1003 },
         { "no-redirect", 0, NULL, 1009 },
+        { "no-orphan", 0, NULL, 1070 },
         { "no-stratum", 0, NULL, 1007 },
         { "no-extranonce", 0, NULL, 1012 },
         { "max-temp", 1, NULL, 1060 },
