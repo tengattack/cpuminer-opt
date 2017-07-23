@@ -53,9 +53,10 @@
 //extern pthread_mutex_t stats_lock;
 
 struct fake_sock {
-	char path[256];
-	time_t mtime;
-	pthread_mutex_t lock;
+	char tx_path[256];
+	char rx_path[256];
+	time_t tx_mtime;
+	time_t rx_mtime;
 };
 
 struct data_buffer {
@@ -1028,22 +1029,21 @@ static bool fake_send_wait(struct fake_sock *fsock)
 
 	time(&rstart);
 
-
-	//debug
-	printf("fake_send_wait\n");
+	if (opt_protocol)
+		applog(LOG_DEBUG, "Fake sock send_wait");
 
 	while (time(NULL) - rstart < 120) {
-		rc = stat(fsock->path, &st);
+		rc = stat(fsock->tx_path, &st);
 		if (rc == 0) {
-			if (fsock->mtime == st.st_mtime) {
+			if (fsock->tx_mtime == st.st_mtime) {
 				goto next_l;
 			}
-			fsock->mtime = st.st_mtime;
+			fsock->tx_mtime = st.st_mtime;
 		} else {
 			goto next_l;
 		}
 
-		fd = open(fsock->path, O_RDONLY);
+		fd = open(fsock->tx_path, O_RDONLY);
 		if (fd < 0) {
 			goto next_l;
 		}
@@ -1056,36 +1056,32 @@ static bool fake_send_wait(struct fake_sock *fsock)
 		}
 		if (size < 4) {
 			goto next_l;
-                }
+		}
 
 		buf[size] = 0;
 
-		if (strncmp(buf, "-> ", 3) == 0 || strncmp(buf, "<- ", 3) == 0) {
-			if (strncmp(buf, "<- ", 3) == 0) {
-				//return false
-				// reset mtime for next time access
-				fsock->mtime = 0;
-				printf("fake_send_wait -> o\n");
-				return true;
-			} else if (size > 4) {
-				goto next_l;
-			}
-			/*if (size > 4) {
+		if (strncmp(buf, "-> ", 3) == 0) {
+			/*
+			// we have send lock, ignore
+			if (size > 4) {
 				// data error
 				cflag = 'x';
 				break;
-			}*/
+			}
+			*/
+			if (size > 4) {
+				goto next_l;
+			}
 
 			if (buf[3] != 'o') {
 				if (buf[3] != 'x') {
-					cflag = 'x';
-					break;
+					// unknow state
 				}
-				printf("fake_send_wait -> x\n");
-				return false;
+				cflag = 'x';
+				break;
 			} else {
-				printf("fake_send_wait -> o\n");
-				return true;
+				cflag = 'o';
+				break;
 			}
 		} else {
 			cflag = 'x';
@@ -1099,21 +1095,24 @@ static bool fake_send_wait(struct fake_sock *fsock)
 		cflag = 't';
 	}
 
-	fd = open(fsock->path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
-	if (fd >= 0) {
-		char fsst[] = "-> t\n";
-		fsst[3] = cflag;
-		write(fd, fsst, 5);
-		close(fd);
+	if (cflag != 'o') {
+		fd = open(fsock->tx_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+		if (fd >= 0) {
+			char fsst[] = "-> t\n";
+			fsst[3] = cflag;
+			write(fd, fsst, 5);
+			close(fd);
 
-		rc = stat(fsock->path, &st);
-		if (rc == 0) {
-			fsock->mtime = st.st_mtime;
+			rc = stat(fsock->tx_path, &st);
+			if (rc == 0) {
+				fsock->tx_mtime = st.st_mtime;
+			}
 		}
 	}
 
-	printf("fake_send_wait -> %c\n", cflag);
-	return false;
+	if (opt_protocol)
+		applog(LOG_DEBUG, "Fake sock send_wait -> %c", cflag);
+	return cflag == 'o';
 }
 
 static bool fake_send_line(struct fake_sock *fsock, char *s)
@@ -1127,19 +1126,18 @@ static bool fake_send_line(struct fake_sock *fsock, char *s)
 
 	time(&rstart);
 
-	//debug
-	printf("fake_send_line\n");
+	if (opt_protocol)
+		applog(LOG_DEBUG, "Fake sock send_line");
 	
 	len = (int) strlen(s);
-        s[len++] = '\n';
-
+	s[len++] = '\n';
 
 	while (time(NULL) - rstart < 120) {
-		fd = open(fsock->path, O_RDONLY);
+		fd = open(fsock->tx_path, O_RDONLY);
 		if (fd < 0) {
 			usleep(100 * 1000);
 			continue;
-    		}
+		}
 		size = read(fd, buf, sizeof(buf) - 4);
 		close(fd);
 
@@ -1149,7 +1147,7 @@ static bool fake_send_line(struct fake_sock *fsock, char *s)
 		}
 		if (size > 0 && size < 4) {
 			usleep(100 * 1000);
-                        continue;
+			continue;
 		}
 
 		buf[size] = 0;
@@ -1170,19 +1168,17 @@ static bool fake_send_line(struct fake_sock *fsock, char *s)
 				}
 			}
 
-			fd = open(fsock->path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+			fd = open(fsock->tx_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 			if (fd < 0) {
 				return false;
 			}
 			sprintf(buf, "-> %s\n", s);
-			// debug
-			printf("%s", buf);
 			write(fd, buf, strlen(buf));
 			close(fd);
 
-			/*rc = stat(fsock->path, &st);
+			/*rc = stat(fsock->tx_path, &st);
 			if (rc == 0) {
-				fsock->mtime = st.st_mtime;
+				fsock->tx_mtime = st.st_mtime;
 			}*/
 
 			// send wait
@@ -1204,12 +1200,9 @@ bool stratum_send_line(struct stratum_ctx *sctx, char *s)
 	if (opt_protocol)
 		applog(LOG_DEBUG, "> %s", s);
 
-	printf("locking send lock\n");
 	pthread_mutex_lock(&sctx->sock_lock);
 	//ret = send_line(sctx->sock, s);
-	pthread_mutex_lock(&((struct fake_sock *)sctx->curl_url)->lock);
 	ret = fake_send_line((struct fake_sock *)sctx->curl_url, s);
-	pthread_mutex_unlock(&((struct fake_sock *)sctx->curl_url)->lock);
 	pthread_mutex_unlock(&sctx->sock_lock);
 
 	return ret;
@@ -1264,23 +1257,20 @@ static int fake_recv(struct fake_sock *fsock, char *buf, int len, int flags)
 	time(&rstart);
 
 	while (time(NULL) - rstart < 20) {
-		if (pthread_mutex_trylock(&fsock->lock) != 0) {
-			return -3;
-		}
-		rc = stat(fsock->path, &st);
+		rc = stat(fsock->rx_path, &st);
 		if (rc == 0) {
-			if (fsock->mtime == st.st_mtime) {
+			if (fsock->rx_mtime == st.st_mtime) {
 				goto next_l;
 			}
-			fsock->mtime = st.st_mtime;
+			fsock->rx_mtime = st.st_mtime;
 		} else {
 			goto next_l;
 		}
 
-		fd = open(fsock->path, O_RDONLY);
+		fd = open(fsock->rx_path, O_RDONLY);
 		if (fd < 0) {
 			goto next_l;
-    		}
+		}
 		size = read(fd, buf, len);
 		close(fd);
 
@@ -1295,83 +1285,63 @@ static int fake_recv(struct fake_sock *fsock, char *buf, int len, int flags)
 		buf[size] = 0;
 		recv_timeout = false;
 
-		if (strncmp(buf, "-> ", 3) == 0 || strncmp(buf, "<- ", 3) == 0) {
-			if (strncmp(buf, "-> ", 3) == 0) {
-				if (size > 4) {
-					// sending
+		if (strncmp(buf, "<- ", 3) == 0) {
+			if (size == 4) {
+				if (buf[3] == 't') {
+					// last state was timeout
+					recv_timeout = true;
+				}
+				if (buf[3] == 'o' || buf[3] == 't') {
+					// no data
 					goto next_l;
-				} else if (buf[3] != 'o' && buf[3] != 't') {
+				} else {
 					// connection close
 					goto error_l;
-				} else {
-					// sent, but no data
-					goto next_l;
-				}
-			} else {
-				if (size == 4) {
-					printf("fake_recv flag: %c\n", buf[3]);
-					if (buf[3] == 't') {
-						recv_timeout = true;
-					}
-					if (buf[3] == 'o' || buf[3] == 't') {
-						// no data
-						goto next_l;
-					} else {
-						// connection close
-						goto error_l;
-					}
 				}
 			}
 
 			memmove(buf, buf + 3, size - 3);
 			size -= 3;
-
-			// debug
 			buf[size] = 0;
-			printf("<- %s\n", buf);
 
-			fd = open(fsock->path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+			fd = open(fsock->rx_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 			if (fd < 0) {
-				printf("write o failed!\n");
+				if (opt_protocol)
+					applog(LOG_DEBUG, "Fake sock recv update state failed!");
 				goto next_l;
 			}
 			write(fd, "<- o\n", 5);
 			close(fd);
 
-			rc = stat(fsock->path, &st);
+			rc = stat(fsock->rx_path, &st);
 			if (rc == 0) {
-				fsock->mtime = st.st_mtime;
+				fsock->rx_mtime = st.st_mtime;
 			}
 
 			buf[size] = '\n';
 			buf[size + 1] = 0;
-			pthread_mutex_unlock(&fsock->lock);
 			return size + 1;
 		} else {
 			goto error_l;
 		}
 	next_l:
-		pthread_mutex_unlock(&fsock->lock);
 		usleep(100 * 1000);
 		continue;
 	error_l:
-		pthread_mutex_unlock(&fsock->lock);
 		return -1;
 	}
 
 	if (!recv_timeout) {
-		pthread_mutex_lock(&fsock->lock);
-		fd = open(fsock->path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+		fd = open(fsock->rx_path, O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 		if (fd >= 0) {
 			write(fd, "<- t\n", 5);
 			close(fd);
 
-			rc = stat(fsock->path, &st);
+			rc = stat(fsock->rx_path, &st);
 			if (rc == 0) {
-				fsock->mtime = st.st_mtime;
+				fsock->rx_mtime = st.st_mtime;
 			}
 		}
-		pthread_mutex_unlock(&fsock->lock);
 	}
 
 	return -2;
@@ -1457,12 +1427,12 @@ bool stratum_connect(struct stratum_ctx *sctx, const char *url)
 	int client_socket;
 	struct hostent        *he;
 	struct sockaddr_in  server;
-        struct addrinfo hints, *servinfo, *p;
+	struct addrinfo hints, *servinfo, *p;
 
-        memset(&hints, 0, sizeof(hints));
-        //hints.ai_family = AF_UNSPEC;
-        hints.ai_family = AF_INET;
-        hints.ai_socktype = SOCK_STREAM;
+	memset(&hints, 0, sizeof(hints));
+	//hints.ai_family = AF_UNSPEC;
+	hints.ai_family = AF_INET;
+	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_protocol = IPPROTO_TCP;
 
 	pthread_mutex_lock(&sctx->sock_lock);
@@ -1485,26 +1455,38 @@ bool stratum_connect(struct stratum_ctx *sctx, const char *url)
 		free(sctx->url);
 		sctx->url = strdup(url);
 	}
-	if (sctx->curl_url) {
-		pthread_mutex_destroy(&((struct fake_sock *) sctx->curl_url)->lock);
-	}
 	free(sctx->curl_url);
 
 	// fake sock
 	char wd[1024];
+	struct fake_sock *fsock;
 	getcwd(wd, sizeof(wd));
 
-	sctx->curl_url = (char*) malloc(sizeof(struct fake_sock));
-	sprintf(((struct fake_sock *) sctx->curl_url)->path, "%s/%s", wd, opt_sock ? opt_sock : "sock");
-	((struct fake_sock *) sctx->curl_url)->mtime = 0;
-	pthread_mutex_init(&((struct fake_sock *) sctx->curl_url)->lock, NULL);
+	fsock = (struct fake_sock *) malloc(sizeof(struct fake_sock));
+	sctx->curl_url = (char *)fsock;
+	sprintf(fsock->tx_path, "%s/tx_%s", wd, opt_sock ? opt_sock : "sock");
+	sprintf(fsock->rx_path, "%s/rx_%s", wd, opt_sock ? opt_sock : "sock");
+	fsock->tx_mtime = 0;
+	fsock->rx_mtime = 0;
 
-	rc = open(((struct fake_sock *) sctx->curl_url)->path,
+	// tx
+	rc = open(fsock->tx_path,
 		O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
 	if (rc < 0) {
+		applog(LOG_ERR, "Fake sock tx file create failed");
 		return false;
 	}
 	close(rc);
+
+	// rx
+	rc = open(fsock->rx_path,
+		O_RDWR | O_CREAT | O_TRUNC, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+	if (rc < 0) {
+		applog(LOG_ERR, "Fake sock rx file create failed");
+		return false;
+	}
+	close(rc);
+
 	//sctx->curl_url = (char*) malloc(strlen(url));
 	//sprintf(sctx->curl_url, "http%s", strstr(url, "://"));
 
@@ -1590,7 +1572,9 @@ bool stratum_connect(struct stratum_ctx *sctx, const char *url)
 		return false;
 	}*/
 
-	printf("fake_connected\n");
+	if (opt_protocol)
+		applog(LOG_DEBUG, "Fake sock connected");
+
 	return true;
 }
 
